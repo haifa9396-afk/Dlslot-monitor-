@@ -1,0 +1,106 @@
+"""
+DL Slot Checker — sends push notification to your phone via ntfy app
+"""
+
+import os, sys, time, logging, urllib.request, urllib.parse, urllib.error
+import http.cookiejar, json, re
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
+log = logging.getLogger(__name__)
+
+APP_NUMBER  = os.environ.get("APP_NUMBER", "")
+DOB         = os.environ.get("DOB", "")
+STATE       = os.environ.get("STATE", "Kerala")
+RTO         = os.environ.get("RTO", "")
+NTFY_TOPIC  = os.environ.get("NTFY_TOPIC", "")
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Connection": "keep-alive",
+}
+
+BASE = "https://sarathi.parivahan.gov.in/sarathiservice"
+
+def send_alert(message):
+    if not NTFY_TOPIC:
+        log.warning("NTFY_TOPIC not set.")
+        return
+    try:
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=message.encode("utf-8"),
+            headers={"Title": "DL SLOT OPEN!", "Priority": "urgent", "Tags": "rotating_light"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        log.info("Phone notification sent!")
+    except Exception as e:
+        log.error(f"Alert failed: {e}")
+
+def fetch(opener, url, data=None, referer=None):
+    hdrs = dict(HEADERS)
+    if referer:
+        hdrs["Referer"] = referer
+    encoded = urllib.parse.urlencode(data).encode() if data else None
+    req = urllib.request.Request(url, data=encoded, headers=hdrs)
+    try:
+        with opener.open(req, timeout=20) as r:
+            raw = r.read()
+            if "gzip" in r.headers.get("Content-Encoding", ""):
+                import gzip; raw = gzip.decompress(raw)
+            return raw.decode("utf-8", errors="ignore")
+    except Exception as e:
+        log.warning(f"Fetch error: {e}")
+        return ""
+
+def check_slots():
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+    log.info("Connecting to Sarathi...")
+    fetch(opener, f"{BASE}/stateSelection.do")
+    time.sleep(1)
+    fetch(opener, f"{BASE}/stateSelection.do",
+          data={"selectedState": STATE, "Submit": "Submit"},
+          referer=f"{BASE}/stateSelection.do")
+    time.sleep(1)
+    fetch(opener, f"{BASE}/dlAppointmentSlotBooking.do",
+          referer=f"{BASE}/stateSelection.do")
+    time.sleep(1)
+    result = fetch(opener, f"{BASE}/dlAppointmentSlotBooking.do",
+                   data={"appNo": APP_NUMBER, "dob": DOB, "Submit": "Submit"},
+                   referer=f"{BASE}/dlAppointmentSlotBooking.do")
+    time.sleep(1)
+
+    if not result:
+        return False, "No response from site"
+
+    page = result.lower()
+    no_slot = any(p in page for p in ["no slot","not available","fully booked","slot full","no appointment","no date"])
+    has_slot = any(p in page for p in ["select date","available date","book slot","confirm appointment","choose date","slot available"])
+
+    if has_slot and not no_slot:
+        dates = list(set(re.findall(r"\b\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b", result)))[:5]
+        detail = f"Dates: {', '.join(dates)}" if dates else "Slot open - book now!"
+        return True, detail
+
+    return False, "No slots yet"
+
+def main():
+    if not APP_NUMBER or not DOB:
+        log.error("APP_NUMBER or DOB missing. Check your GitHub Secrets.")
+        sys.exit(1)
+
+    log.info(f"Checking slots for App No: {APP_NUMBER[:4]}**** | {STATE}")
+    found, detail = check_slots()
+
+    if found:
+        log.info(f"SLOT FOUND: {detail}")
+        send_alert(f"Open Sarathi NOW and book your DL test slot! {detail}\nsarathi.parivahan.gov.in")
+    else:
+        log.info(f"Result: {detail}. Will check again in 5 min.")
+
+if __name__ == "__main__":
+    main()
